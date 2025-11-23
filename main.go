@@ -29,8 +29,20 @@ func main() {
 	// Start health check server
 	healthServer := startHealthServer(healthPort)
 
+	// Start dynamoDB client
+	client, err := NewDynamoDBClient("ServiceState", region)
+	if err != nil {
+		log.Fatalf("Failed to create DynamoDB client: %v", err)
+	}
+
+	// Start Lambda client
+	lambdaClient, err := NewLambdaClient(region)
+	if err != nil {
+		log.Fatalf("Failed to create Lambda client: %v", err)
+	}
+
 	// Create consumer
-	consumer, err := NewSQSConsumer(queueURL, region)
+	consumer, err := NewSQSConsumer(queueURL, region, client, lambdaClient)
 	if err != nil {
 		log.Fatalf("Failed to create SQS consumer: %v", err)
 	}

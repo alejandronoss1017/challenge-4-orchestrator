@@ -3,29 +3,26 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
+	"math/rand"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
 
 type SQSConsumer struct {
-	sqsClient *sqs.Client
-	queueURL  string
+	sqsClient      *sqs.Client
+	dynamoDBClient *DynamoDBClient
+	lambdaClient   *LambdaClient
+	queueURL       string
 }
 
-type SNSWrapper struct {
-	Type      string `json:"Type"`
-	Message   string `json:"Message"`
-	MessageId string `json:"MessageId"`
-	TopicArn  string `json:"TopicArn"`
-	Timestamp string `json:"Timestamp"`
-}
-
-func NewSQSConsumer(queueURL string, region string) (*SQSConsumer, error) {
+func NewSQSConsumer(queueURL string, region string, client *DynamoDBClient, lambdaClient *LambdaClient) (*SQSConsumer, error) {
 	// Load AWS configuration with region
 	cfg, err := config.LoadDefaultConfig(context.TODO(),
 		config.WithRegion(region),
@@ -35,8 +32,10 @@ func NewSQSConsumer(queueURL string, region string) (*SQSConsumer, error) {
 	}
 
 	return &SQSConsumer{
-		sqsClient: sqs.NewFromConfig(cfg),
-		queueURL:  queueURL,
+		sqsClient:      sqs.NewFromConfig(cfg),
+		dynamoDBClient: client,
+		lambdaClient:   lambdaClient,
+		queueURL:       queueURL,
 	}, nil
 }
 
@@ -74,12 +73,7 @@ func (c *SQSConsumer) pollMessages(ctx context.Context) {
 }
 
 func (c *SQSConsumer) processMessage(ctx context.Context, message types.Message) {
-	if message.MessageId != nil {
-		log.Printf("Processing message: %v", message)
-	}
-
-	// Parse the SNS message wrapper
-	var snsWrapper SNSWrapper
+	log.Printf("Processing message: %+v", message)
 
 	if message.Body == nil {
 		log.Printf("Message body is nil")
@@ -87,22 +81,15 @@ func (c *SQSConsumer) processMessage(ctx context.Context, message types.Message)
 		return
 	}
 
-	if err := json.Unmarshal([]byte(*message.Body), &snsWrapper); err != nil {
-		log.Printf("Error parsing SNS wrapper: %v", err)
-		c.deleteMessage(ctx, message)
-		return
-	}
-
 	// Parse your actual message
-	var appMessage map[string]any
-	if err := json.Unmarshal([]byte(snsWrapper.Message), &appMessage); err != nil {
+	var appMessage any
+	if err := json.Unmarshal([]byte(*message.Body), &appMessage); err != nil {
 		log.Printf("Error parsing app message: %v", err)
 		c.deleteMessage(ctx, message)
 		return
 	}
-
 	// Process your business logic
-	if err := c.handleBusinessLogic(appMessage); err != nil {
+	if err := c.handleBusinessLogic(ctx, appMessage); err != nil {
 		log.Printf("Error processing message: %v", err)
 		// Don't delete on business logic error - let it retry
 		return
@@ -112,12 +99,56 @@ func (c *SQSConsumer) processMessage(ctx context.Context, message types.Message)
 	c.deleteMessage(ctx, message)
 }
 
-func (c *SQSConsumer) handleBusinessLogic(msg map[string]any) error {
+func (c *SQSConsumer) handleBusinessLogic(ctx context.Context, msg any) error {
 	// Implement your business logic here
 	log.Printf("Processing app message: %v", msg)
 
-	// TODO: Implement actual business logic
-	log.Print("Verify, heart beat and send to a lambda")
+	// TODO: Check hash to verify the message has been not modified.
+
+	// Obtener la Lambda activa desde DynamoDB
+	items, err := c.dynamoDBClient.Scan(ctx, nil, nil)
+	if err != nil {
+		return fmt.Errorf("item with id: %s in table: %s not found, error: %v", "lambdaActiva", c.dynamoDBClient.tableName, err)
+	}
+
+	var lambdas []Lambda
+
+	for _, item := range items {
+
+		var lambda Lambda
+
+		err = attributevalue.UnmarshalMap(item, &lambda)
+		if err != nil {
+			return fmt.Errorf("failed to unmarshal item: %w", err)
+		}
+
+		if lambda.Status == Healthy {
+			lambdas = append(lambdas, lambda)
+		}
+	}
+
+	// Select and invoke Lambda using switch
+	var selectedLambda Lambda
+	var responseBytes []byte
+
+	switch len(lambdas) {
+	case 0:
+		return fmt.Errorf("no healthy lambdas found")
+	case 1:
+		selectedLambda = lambdas[0]
+	default:
+		// Random selection of Lambda when there are multiple options
+		selectedLambda = lambdas[rand.Intn(len(lambdas))]
+	}
+
+	// Invoke the selected Lambda
+	log.Printf("Invoking lambda: %s (ARN: %s)", selectedLambda.Name, selectedLambda.ARN)
+	responseBytes, err = c.lambdaClient.InvokeSync(ctx, selectedLambda.ARN, msg)
+	if err != nil {
+		return fmt.Errorf("error invoking lambda %s: %w", selectedLambda.ARN, err)
+	}
+
+	log.Printf("Lambda response: %s", string(responseBytes))
 
 	return nil
 }
