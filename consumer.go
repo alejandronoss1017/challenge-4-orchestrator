@@ -165,7 +165,7 @@ func (c *SQSConsumer) handleBusinessLogic(ctx context.Context, msg any) error {
 		return fmt.Errorf("error invoking lambda %s: %w", selectedLambda.ARN, err)
 	}
 
-	log.Printf("Lambda integrity: %s", string(responseBytes))
+	log.Printf("Lambda selected: %s", string(responseBytes))
 
 	return nil
 }
