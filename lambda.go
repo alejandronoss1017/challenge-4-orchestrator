@@ -11,6 +11,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/lambda/types"
 )
 
+type LambdaResponse struct {
+	StatusCode int `json:"statusCode"`
+	Body       any `json:"body"`
+}
+
 type LambdaClient struct {
 	client *lambda.Client
 }

@@ -15,6 +15,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 )
 
+const IntegrityLambda = "arn:aws:lambda:us-east-1:652276263254:function:validacionDatos-py"
+
 type SQSConsumer struct {
 	sqsClient      *sqs.Client
 	dynamoDBClient *DynamoDBClient
@@ -88,6 +90,7 @@ func (c *SQSConsumer) processMessage(ctx context.Context, message types.Message)
 		c.deleteMessage(ctx, message)
 		return
 	}
+
 	// Process your business logic
 	if err := c.handleBusinessLogic(ctx, appMessage); err != nil {
 		log.Printf("Error processing message: %v", err)
@@ -104,6 +107,20 @@ func (c *SQSConsumer) handleBusinessLogic(ctx context.Context, msg any) error {
 	log.Printf("Processing app message: %v", msg)
 
 	// TODO: Check hash to verify the message has been not modified.
+	payload, err := c.lambdaClient.InvokeSync(ctx, IntegrityLambda, msg)
+	if err != nil {
+		return fmt.Errorf("error calling the integrity lambda: %v", err)
+	}
+
+	var integrity LambdaResponse
+
+	if err := json.Unmarshal(payload, &integrity); err != nil {
+		return fmt.Errorf("error unmarshalling json: %v", err)
+	}
+
+	if integrity.StatusCode != 200 {
+		return fmt.Errorf("not matching signatures: %+v", integrity)
+	}
 
 	// Obtener la Lambda activa desde DynamoDB
 	items, err := c.dynamoDBClient.Scan(ctx, nil, nil)
@@ -148,7 +165,7 @@ func (c *SQSConsumer) handleBusinessLogic(ctx context.Context, msg any) error {
 		return fmt.Errorf("error invoking lambda %s: %w", selectedLambda.ARN, err)
 	}
 
-	log.Printf("Lambda response: %s", string(responseBytes))
+	log.Printf("Lambda integrity: %s", string(responseBytes))
 
 	return nil
 }
